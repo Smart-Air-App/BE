@@ -1,0 +1,130 @@
+name: CD for main
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKERHUB_REPOSITORY_NAME: ${{ secrets.DOCKERHUB_REPOSITORY_NAME }}
+  IMAGE_TAG: latest
+
+jobs:
+  build-and-docker-operations:
+    runs-on: ubuntu-latest
+    needs: ci  
+    outputs:
+      image_tag: ${{ steps.generate_tag.outputs.tag }}
+    
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'corretto'
+        
+    - name: Create resources directory
+      run: mkdir -p src/main/resources
+        
+    - name: Update application.yml
+      run: |
+        echo "${{ secrets.APPLICATION }}" > ./src/main/resources/application.yml
+        
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        cache-write-only: true
+        
+    - name: Set up Docker
+      uses: docker/setup-buildx-action@v2
+        
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+      
+    - name: Build JAR
+      run: ./gradlew bootjar
+      
+    - name: Generate Unique Tag
+      id: generate_tag
+      run: echo "::set-output name=tag::$(echo $GITHUB_SHA | cut -c1-7)"
+      
+    - name: Build Docker image
+      run: docker build -t ${{ env.DOCKERHUB_REPOSITORY_NAME }}:${{ steps.generate_tag.outputs.tag }} .
+      
+    - name: Login to Docker Hub
+      uses: docker/login-action@v1
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+        
+    - name: Push Docker image
+      run: |
+        docker tag ${{ env.DOCKERHUB_REPOSITORY_NAME }}:${{ steps.generate_tag.outputs.tag }} ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKERHUB_REPOSITORY_NAME }}:${{ steps.generate_tag.outputs.tag }}
+        docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKERHUB_REPOSITORY_NAME }}:${{ steps.generate_tag.outputs.tag }}
+        
+    - name: Set up SSH key
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/smartAir-server-key.pem
+        chmod 400 ~/.ssh/smartAir-server-key.pem
+
+    - name: Add EC2 to known hosts
+      run: |
+        ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+    - name: Start SSH Tunnel
+      run: |
+        nohup ssh -N -L 3306:${{ secrets.RDS_ENDPOINT }}:3306 ec2-user@${{ secrets.EC2_HOST }} -i ~/.ssh/smartAir-server-key.pem &
+        sleep 5
+
+  deploy:
+    needs: build-and-docker-operations
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Copy Docker files
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: "ec2-user"
+          key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          port: 22
+          source: "docker/docker-compose.yml,docker/scripts/docker-install.sh"
+          target: 'compose'
+          rm: true
+
+      - name: SSH remote and Run Docker Compose
+        uses: appleboy/ssh-action@master
+        env:
+          MYSQL_DB_NAME: ${{ secrets.MYSQL_DB_NAME }}       
+          MYSQL_DB_USERNAME: ${{ secrets.MYSQL_DB_USERNAME }}  
+          MYSQL_DB_PASSWORD: ${{ secrets.MYSQL_DB_PASSWORD }} 
+          IMAGE_TAG: ${{ needs.build-and-docker-operations.outputs.image_tag }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_REPOSITORY_NAME: ${{ secrets.DOCKERHUB_REPOSITORY_NAME }}
+          RDS_ENDPOINT: ${{ secrets.RDS_ENDPOINT }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: "ec2-user"
+          key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          port: 22
+          envs: MYSQL_DB_NAME,MYSQL_DB_USERNAME,MYSQL_DB_PASSWORD,IMAGE_TAG,DOCKERHUB_USERNAME,DOCKERHUB_REPOSITORY_NAME,RDS_ENDPOINT
+          script: |
+            cd compose/docker/
+            sudo touch .env
+            sudo echo "
+            MYSQL_DB_NAME=$MYSQL_DB_NAME
+            MYSQL_DB_USERNAME=$MYSQL_DB_USERNAME
+            MYSQL_DB_PASSWORD=$MYSQL_DB_PASSWORD
+            IMAGE_TAG=$IMAGE_TAG
+            RDS_ENDPOINT=$RDS_ENDPOINT
+            DOCKERHUB_USERNAME=$DOCKERHUB_USERNAME
+            DOCKERHUB_REPOSITORY_NAME=$DOCKERHUB_REPOSITORY_NAME" | sudo tee .env
+            sh ./scripts/docker-install.sh
+            sudo docker pull $DOCKERHUB_USERNAME/$DOCKERHUB_REPOSITORY_NAME:$IMAGE_TAG
+            sudo docker-compose down
+            sudo docker-compose up -d 
