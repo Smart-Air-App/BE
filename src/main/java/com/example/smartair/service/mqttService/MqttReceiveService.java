@@ -113,7 +113,7 @@ public class MqttReceiveService {
         }
     }
 
-//    @Scheduled(fixedRate = 3600000)
+    @Scheduled(fixedRate = 3600000)
     public void cleanupOldMessagesInQueue() { // 1시간마다 메세지 큐에서 데이터 제거
         log.info("Starting hourly data collection...");
         try {

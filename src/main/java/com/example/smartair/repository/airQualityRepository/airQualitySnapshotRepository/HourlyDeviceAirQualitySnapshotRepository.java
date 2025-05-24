@@ -24,4 +24,10 @@ public interface HourlyDeviceAirQualitySnapshotRepository extends JpaRepository<
     );
 
     List<HourlySensorAirQualitySnapshot> findBySensorAndSnapshotHourBetweenOrderBySnapshotHourAsc(Sensor sensor, LocalDateTime startOfDay, LocalDateTime endOfDay);
+
+    @Query("SELECT h FROM HourlySensorAirQualitySnapshot h WHERE h.sensor = :sensor AND h.snapshotHour >= :startHour AND h.snapshotHour < :endHour")
+    Optional<HourlySensorAirQualitySnapshot> findBySensorAndHourRange(
+            @Param("sensor") Sensor sensor,
+            @Param("startHour") LocalDateTime startHour,
+            @Param("endHour") LocalDateTime endHour);
 }

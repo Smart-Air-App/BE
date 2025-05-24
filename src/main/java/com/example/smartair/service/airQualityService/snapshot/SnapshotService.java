@@ -118,9 +118,10 @@ public class SnapshotService {
         Sensor sensor = sensorRepository.findBySerialNumber(serialNumber)
                 .orElseThrow(() -> new CustomException(ErrorCode.SENSOR_NOT_FOUND));
 
-        snapshotHour = snapshotHour.truncatedTo(ChronoUnit.HOURS);
+        LocalDateTime startHour = snapshotHour.truncatedTo(ChronoUnit.HOURS);
+        LocalDateTime endHour = startHour.plusHours(1);
 
-        return snapshotRepository.findBySensorAndSnapshotHour(sensor, snapshotHour)
+        return snapshotRepository.findBySensorAndHourRange(sensor, startHour, endHour)
                 .orElseThrow(() -> new CustomException(ErrorCode.SNAPSHOT_NOT_FOUND));
     }
 
